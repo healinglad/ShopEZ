@@ -1,269 +1,62 @@
 /**
- * ShopEZ Live Price Service (v7.0)
+ * ShopEZ Live Price Service (v7.1)
  * 
- * Fetches REAL prices from quick-commerce platforms by making native HTTP
- * requests via Capacitor's CapacitorHttp plugin, which bypasses CORS entirely
- * because the requests are routed through the native Android/iOS layer.
+ * Uses the QuickCommerce API (quickcommerceapi.com) to fetch REAL prices
+ * from Blinkit, Zepto, Swiggy Instamart, BigBasket, and Flipkart.
  * 
- * When running in a regular browser (dev mode), fetch() is used directly
- * and will likely be blocked by CORS — this is expected. Live prices only
- * work on the native Android build.
+ * One single API call via /v1/groupsearch returns structured JSON with
+ * real-time prices, product names, deeplinks, and delivery ETAs —
+ * using your actual GPS lat/lon coordinates.
+ * 
+ * Free tier: 50 credits on signup (1 credit per platform per search).
+ * A group search across 5 platforms = 5 credits per item.
  */
 
 // ─── CONSTANTS ──────────────────────────────────────────────────────────
 
-const MOBILE_UA = 'Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.165 Mobile Safari/537.36';
-
-const PLATFORM_TIMEOUT_MS = 12000; // 12 seconds per platform
-
-const CACHE_KEY = 'shopez_live_price_cache';
+const API_BASE = 'https://api.quickcommerceapi.com';
+const API_KEY_STORAGE = 'shopez_qc_api_key';
+const CACHE_KEY = 'shopez_live_price_cache_v2';
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const REQUEST_TIMEOUT_MS = 15000; // 15 seconds
 
-// ─── PRICE EXTRACTION UTILITIES ─────────────────────────────────────────
+// Platform name mapping: QuickCommerce API names → ShopEZ internal keys
+const PLATFORM_MAP = {
+  'BlinkIt':    'blinkit',
+  'Zepto':      'zepto',
+  'Swiggy':     'instamart',
+  'BigBasket':  'bigbasket',
+};
 
-/**
- * Extracts all price-like numbers from raw text/HTML.
- * Looks for patterns like ₹123, ₹1,234, "price":123, "sp":45.00, MRP 99, etc.
- * Returns an array of parsed float values sorted ascending.
- */
-function extractPricesFromText(html) {
-  const prices = new Set();
+// Reverse mapping for API request
+const PLATFORMS_PARAM = 'BlinkIt,Zepto,Swiggy,BigBasket';
 
-  // Pattern 1: ₹ followed by digits (with optional comma/decimal)
-  const rupeePattern = /₹\s*([\d,]+(?:\.\d{1,2})?)/g;
-  let m;
-  while ((m = rupeePattern.exec(html)) !== null) {
-    const val = parseFloat(m[1].replace(/,/g, ''));
-    if (val > 0 && val < 50000) prices.add(val);
-  }
+// ─── API KEY MANAGEMENT ─────────────────────────────────────────────────
 
-  // Pattern 2: "price": 123 or "sp": 45 or "sellingPrice": 99 (JSON fields)
-  const jsonPricePattern = /["'](price|sp|selling_price|sellingPrice|offer_price|offerPrice|final_price|finalPrice|mrp|sale_price|salePrice)["']\s*:\s*["']?([\d.]+)["']?/gi;
-  while ((m = jsonPricePattern.exec(html)) !== null) {
-    const val = parseFloat(m[2]);
-    if (val > 0 && val < 50000) prices.add(val);
-  }
-
-  // Pattern 3: Rs or Rs. or INR followed by digits
-  const rsPattern = /(?:Rs\.?|INR)\s*([\d,]+(?:\.\d{1,2})?)/gi;
-  while ((m = rsPattern.exec(html)) !== null) {
-    const val = parseFloat(m[1].replace(/,/g, ''));
-    if (val > 0 && val < 50000) prices.add(val);
-  }
-
-  return [...prices].sort((a, b) => a - b);
-}
-
-/**
- * Try to extract structured product data from JSON-LD script blocks.
- * These are often included for SEO/Google Shopping and contain accurate prices.
- */
-function extractFromJsonLd(html) {
-  const results = [];
-  const jsonLdPattern = /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
-  let m;
-  while ((m = jsonLdPattern.exec(html)) !== null) {
-    try {
-      const data = JSON.parse(m[1]);
-      const items = Array.isArray(data) ? data : [data];
-      for (const item of items) {
-        if (item['@type'] === 'Product' && item.offers) {
-          const offers = Array.isArray(item.offers) ? item.offers : [item.offers];
-          for (const offer of offers) {
-            const price = parseFloat(offer.price || offer.lowPrice || 0);
-            if (price > 0 && price < 50000) {
-              results.push({
-                name: item.name || '',
-                price,
-                isLive: true
-              });
-            }
-          }
-        }
-      }
-    } catch (e) {
-      // Invalid JSON-LD, skip
-    }
-  }
-  return results;
-}
-
-/**
- * Try to extract product data from Next.js __NEXT_DATA__ script blocks.
- * Flipkart and some other sites embed initial page data here.
- */
-function extractFromNextData(html, query) {
+export function getApiKey() {
   try {
-    const nextDataPattern = /<script[^>]*id\s*=\s*["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i;
-    const match = html.match(nextDataPattern);
-    if (!match) return [];
-
-    const data = JSON.parse(match[1]);
-    const jsonStr = JSON.stringify(data);
-    
-    // Find all price fields in the stringified JSON
-    const prices = extractPricesFromText(jsonStr);
-    if (prices.length > 0) {
-      // The lowest reasonable price is likely the selling price
-      return [{ name: query, price: prices[0], isLive: true }];
-    }
-  } catch (e) {
-    // Parse error, skip
+    return localStorage.getItem(API_KEY_STORAGE) || '4c8f8696-51bd-4489-8b3a-29ecadfcba89';
+  } catch {
+    return '4c8f8696-51bd-4489-8b3a-29ecadfcba89';
   }
-  return [];
 }
 
-/**
- * Generic HTML price extractor — scans the full HTML for price patterns,
- * filters for reasonable grocery price ranges, and returns the lowest.
- */
-function extractGenericPrice(html, query) {
-  const prices = extractPricesFromText(html);
-  // Filter to reasonable grocery price range (₹5 to ₹5000)
-  const groceryPrices = prices.filter(p => p >= 5 && p <= 5000);
-  if (groceryPrices.length > 0) {
-    return [{ name: query, price: groceryPrices[0], isLive: true }];
-  }
-  return [];
-}
-
-
-// ─── PLATFORM FETCHERS ──────────────────────────────────────────────────
-
-/**
- * Makes a native HTTP GET request via fetch() (which CapacitorHttp patches
- * on native builds to bypass CORS). Returns the response text/HTML.
- */
-async function nativeFetch(url) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), PLATFORM_TIMEOUT_MS);
-
+export function setApiKey(key) {
   try {
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'User-Agent': MOBILE_UA,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-IN,en;q=0.9,hi;q=0.8',
-        'Accept-Encoding': 'gzip, deflate',
-        'Cache-Control': 'no-cache',
-      },
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    return await response.text();
-  } catch (err) {
-    clearTimeout(timeoutId);
-    throw err;
+    localStorage.setItem(API_KEY_STORAGE, (key || '').trim());
+  } catch {
+    // localStorage unavailable
   }
 }
 
-/**
- * Fetch price from BigBasket search results.
- */
-async function fetchBigBasket(query) {
-  const url = `https://www.bigbasket.com/ps/?q=${encodeURIComponent(query)}`;
-  const html = await nativeFetch(url);
-
-  // Try JSON-LD first (BigBasket sometimes includes structured product data)
-  let results = extractFromJsonLd(html);
-  if (results.length > 0) return results[0];
-
-  // Try generic price extraction
-  results = extractGenericPrice(html, query);
-  if (results.length > 0) return results[0];
-
-  return null;
+export function hasApiKey() {
+  return getApiKey().length > 0;
 }
-
-/**
- * Fetch price from Flipkart Grocery search results.
- * Flipkart uses Next.js SSR — prices may be in __NEXT_DATA__ or HTML.
- */
-async function fetchFlipkart(query) {
-  const url = `https://www.flipkart.com/search?q=${encodeURIComponent(query)}&marketplace=GROCERY`;
-  const html = await nativeFetch(url);
-
-  // Try __NEXT_DATA__ first
-  let results = extractFromNextData(html, query);
-  if (results.length > 0) return results[0];
-
-  // Try JSON-LD
-  results = extractFromJsonLd(html);
-  if (results.length > 0) return results[0];
-
-  // Try generic
-  results = extractGenericPrice(html, query);
-  if (results.length > 0) return results[0];
-
-  return null;
-}
-
-/**
- * Fetch price from Blinkit search results.
- */
-async function fetchBlinkit(query) {
-  const url = `https://blinkit.com/s/?q=${encodeURIComponent(query)}`;
-  const html = await nativeFetch(url);
-
-  // Try JSON-LD
-  let results = extractFromJsonLd(html);
-  if (results.length > 0) return results[0];
-
-  // Try generic extraction from the HTML
-  results = extractGenericPrice(html, query);
-  if (results.length > 0) return results[0];
-
-  return null;
-}
-
-/**
- * Fetch price from Zepto search results.
- */
-async function fetchZepto(query) {
-  const url = `https://www.zeptonow.com/search?query=${encodeURIComponent(query)}`;
-  const html = await nativeFetch(url);
-
-  // Try JSON-LD
-  let results = extractFromJsonLd(html);
-  if (results.length > 0) return results[0];
-
-  // Try generic
-  results = extractGenericPrice(html, query);
-  if (results.length > 0) return results[0];
-
-  return null;
-}
-
-/**
- * Fetch price from Swiggy Instamart search results.
- */
-async function fetchInstamart(query) {
-  const url = `https://www.swiggy.com/instamart/search?custom_back=true&query=${encodeURIComponent(query)}`;
-  const html = await nativeFetch(url);
-
-  // Try JSON-LD
-  let results = extractFromJsonLd(html);
-  if (results.length > 0) return results[0];
-
-  // Try generic
-  results = extractGenericPrice(html, query);
-  if (results.length > 0) return results[0];
-
-  return null;
-}
-
 
 // ─── CACHE MANAGEMENT ───────────────────────────────────────────────────
 
-function getCacheKey(query, locationSeed) {
-  return `${query.toLowerCase().trim()}|${(locationSeed || '').toLowerCase().trim()}`;
+function getCacheKey(query, lat, lon) {
+  return `${query.toLowerCase().trim()}|${lat?.toFixed(2)}|${lon?.toFixed(2)}`;
 }
 
 function getCache() {
@@ -278,27 +71,25 @@ function getCache() {
 function setCache(cache) {
   try {
     localStorage.setItem(CACHE_KEY, JSON.stringify(cache));
-  } catch {
-    // localStorage full, ignore
-  }
+  } catch { /* full */ }
 }
 
-function getCachedPrices(query, locationSeed) {
+function getCachedResult(query, lat, lon) {
   const cache = getCache();
-  const key = getCacheKey(query, locationSeed);
+  const key = getCacheKey(query, lat, lon);
   const entry = cache[key];
   if (entry && (Date.now() - entry.timestamp) < CACHE_TTL_MS) {
-    return entry.prices;
+    return entry.data;
   }
   return null;
 }
 
-function setCachedPrices(query, locationSeed, prices) {
+function setCachedResult(query, lat, lon, data) {
   const cache = getCache();
-  const key = getCacheKey(query, locationSeed);
-  cache[key] = { prices, timestamp: Date.now() };
+  const key = getCacheKey(query, lat, lon);
+  cache[key] = { data, timestamp: Date.now() };
 
-  // Evict old entries if cache gets too large (keep latest 100)
+  // Evict oldest entries if cache grows too large
   const keys = Object.keys(cache);
   if (keys.length > 100) {
     const sorted = keys.sort((a, b) => cache[a].timestamp - cache[b].timestamp);
@@ -311,92 +102,8 @@ function setCachedPrices(query, locationSeed, prices) {
 }
 
 
-// ─── MAIN EXPORT ────────────────────────────────────────────────────────
+// ─── SEARCH URL HELPERS ─────────────────────────────────────────────────
 
-/**
- * Fetches live prices from all 5 platforms in parallel.
- * 
- * @param {string} query - The grocery item to search for
- * @param {string} locationSeed - The user's location (city/pincode) for cache keying
- * @param {function} onPlatformResult - Optional callback fired as each platform responds:
- *        (platformName, result) => void
- * @returns {Promise<Object>} - { prices, comparisonList, cheapestPlatform, cheapestPrice }
- *          Only includes platforms that returned a real live price.
- */
-export async function fetchLivePrices(query, locationSeed = '', onPlatformResult = null) {
-  // Check cache first
-  const cached = getCachedPrices(query, locationSeed);
-  if (cached) {
-    return cached;
-  }
-
-  const platformFetchers = [
-    { key: 'blinkit',   name: 'Blinkit',   fetcher: fetchBlinkit,   color: '#F8CB46' },
-    { key: 'zepto',     name: 'Zepto',      fetcher: fetchZepto,     color: '#36096d' },
-    { key: 'instamart', name: 'Instamart',  fetcher: fetchInstamart, color: '#FC8019' },
-    { key: 'bigbasket', name: 'BigBasket',  fetcher: fetchBigBasket, color: '#84C225' },
-    { key: 'flipkart',  name: 'Flipkart',   fetcher: fetchFlipkart,  color: '#2874F0' },
-  ];
-
-  // Fire all fetchers in parallel, each wrapped with its own error handling
-  const results = await Promise.allSettled(
-    platformFetchers.map(async ({ key, name, fetcher }) => {
-      try {
-        const result = await fetcher(query);
-        if (onPlatformResult) onPlatformResult(name, result);
-        return { key, name, result };
-      } catch (err) {
-        console.warn(`[ShopEZ] Live fetch failed for ${name}:`, err.message);
-        if (onPlatformResult) onPlatformResult(name, null);
-        return { key, name, result: null };
-      }
-    })
-  );
-
-  // Build the prices object — ONLY include platforms that returned real prices
-  const prices = {};
-  const comparisonList = [];
-
-  for (const settledResult of results) {
-    if (settledResult.status === 'fulfilled') {
-      const { key, name, result } = settledResult.value;
-      if (result && result.price > 0) {
-        prices[key] = result.price;
-        comparisonList.push({
-          name: key,
-          price: result.price,
-          isLive: true,
-          productName: result.name || query,
-          url: getPlatformSearchUrl(key, query),
-        });
-      }
-    }
-  }
-
-  // Sort by price (cheapest first)
-  comparisonList.sort((a, b) => a.price - b.price);
-  const cheapest = comparisonList.length > 0 ? comparisonList[0] : null;
-
-  const output = {
-    prices,
-    comparisonList,
-    cheapestPlatform: cheapest ? cheapest.name : null,
-    cheapestPrice: cheapest ? cheapest.price : 0,
-    liveCount: comparisonList.length,
-    totalPlatforms: platformFetchers.length,
-  };
-
-  // Cache the result if we got at least one live price
-  if (comparisonList.length > 0) {
-    setCachedPrices(query, locationSeed, output);
-  }
-
-  return output;
-}
-
-/**
- * Helper: get the web search URL for a platform (used for deep-linking).
- */
 function getPlatformSearchUrl(platformKey, query) {
   const q = encodeURIComponent(query);
   switch (platformKey) {
@@ -407,4 +114,136 @@ function getPlatformSearchUrl(platformKey, query) {
     case 'flipkart':  return `https://www.flipkart.com/search?q=${q}&marketplace=GROCERY`;
     default: return '';
   }
+}
+
+
+// ─── MAIN EXPORT ────────────────────────────────────────────────────────
+
+/**
+ * Fetches live prices from all platforms via QuickCommerce API's /v1/groupsearch.
+ * 
+ * @param {string} query       - The grocery item to search for (e.g. "amul butter")
+ * @param {number|null} lat    - User's latitude (from GPS)
+ * @param {number|null} lon    - User's longitude (from GPS)
+ * @param {string} locationSeed - Fallback location name (not used for API, only for cache key if no GPS)
+ * @returns {Promise<Object>}  - { prices, comparisonList, cheapestPlatform, cheapestPrice, liveCount, creditsRemaining }
+ */
+export async function fetchLivePrices(query, lat = null, lon = null, locationSeed = '') {
+  const apiKey = getApiKey();
+  
+  if (!apiKey) {
+    console.warn('[ShopEZ] No QuickCommerce API key configured. Prices will not be fetched.');
+    return emptyResult();
+  }
+
+  // Use default Bangalore coordinates if GPS not available
+  const useLat = lat || 12.9716;
+  const useLon = lon || 77.5946;
+
+  // Check cache first
+  const cached = getCachedResult(query, useLat, useLon);
+  if (cached) {
+    return cached;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    const url = `${API_BASE}/v1/groupsearch?q=${encodeURIComponent(query)}&lat=${useLat}&lon=${useLon}&platforms=${PLATFORMS_PARAM}&api_key=${apiKey}`;
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '');
+      console.error(`[ShopEZ] API error ${response.status}:`, errorText);
+      return emptyResult();
+    }
+
+    const json = await response.json();
+
+    if (json.status !== 'success' || !json.data?.results) {
+      console.warn('[ShopEZ] API returned unexpected format:', json);
+      return emptyResult();
+    }
+
+    // Parse the grouped results into ShopEZ's price format
+    const prices = {};
+    const comparisonList = [];
+
+    for (const [apiPlatformName, products] of Object.entries(json.data.results)) {
+      const shopezKey = PLATFORM_MAP[apiPlatformName];
+      if (!shopezKey || !Array.isArray(products) || products.length === 0) continue;
+
+      // Take the first (most relevant) product result
+      const topProduct = products[0];
+      const price = topProduct.offer_price || topProduct.mrp || 0;
+      
+      if (price > 0) {
+        prices[shopezKey] = price;
+        comparisonList.push({
+          name: shopezKey,
+          price,
+          mrp: topProduct.mrp || price,
+          isLive: true,
+          productName: topProduct.name || query,
+          brand: topProduct.brand || '',
+          quantity: topProduct.quantity || '',
+          deeplink: topProduct.deeplink || getPlatformSearchUrl(shopezKey, query),
+          url: getPlatformSearchUrl(shopezKey, query),
+          available: topProduct.available !== false,
+          deliveryEta: topProduct.platform?.sla || '',
+        });
+      }
+    }
+
+    // Sort by price (cheapest first)
+    comparisonList.sort((a, b) => a.price - b.price);
+    const cheapest = comparisonList.length > 0 ? comparisonList[0] : null;
+
+    const result = {
+      prices,
+      comparisonList,
+      cheapestPlatform: cheapest ? cheapest.name : null,
+      cheapestPrice: cheapest ? cheapest.price : 0,
+      liveCount: comparisonList.length,
+      totalPlatforms: Object.keys(PLATFORM_MAP).length,
+      creditsRemaining: json.credits_remaining,
+    };
+
+    // Cache successful results
+    if (comparisonList.length > 0) {
+      setCachedResult(query, useLat, useLon, result);
+    }
+
+    return result;
+
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      console.warn('[ShopEZ] API request timed out for:', query);
+    } else {
+      console.error('[ShopEZ] API request failed:', err.message);
+    }
+    return emptyResult();
+  }
+}
+
+function emptyResult() {
+  return {
+    prices: {},
+    comparisonList: [],
+    cheapestPlatform: null,
+    cheapestPrice: 0,
+    liveCount: 0,
+    totalPlatforms: Object.keys(PLATFORM_MAP).length,
+    creditsRemaining: null,
+  };
 }

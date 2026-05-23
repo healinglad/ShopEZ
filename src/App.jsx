@@ -234,7 +234,7 @@ function App() {
                         const city = addr.city || addr.town || addr.state_district || 'India';
                         const postcode = addr.postcode || '';
                         const label = `📍 ${neighborhood ? `${neighborhood}, ` : ''}${city}${postcode ? ` (${postcode})` : ''}`;
-                        setLocation({ label, seed: postcode || city });
+                        setLocation({ label, seed: postcode || city, lat: latitude, lon: longitude });
                     })
                     .catch(() => {
                         // Keep fallback Bangalore
@@ -254,7 +254,7 @@ function App() {
 
     // --- GEOGRAPHIC LOCATION UPDATER ---
     const handleLocationUpdate = (newLabel, newSeed) => {
-        setLocation({ label: newLabel, seed: newSeed });
+        setLocation({ label: newLabel, seed: newSeed, lat: null, lon: null });
         // Reset all prices to null to trigger fresh live discovery for the new location
         setLists(prev => prev.map(l => ({
             ...l,
@@ -289,8 +289,8 @@ function App() {
             };
         }));
 
-        // Execute LIVE background search across all 5 platforms
-        fetchPrices(itemToFetch.text, location.seed).then(data => {
+        // Execute LIVE background search across all platforms using GPS
+        fetchPrices(itemToFetch.text, location.seed, location.lat, location.lon).then(data => {
             setLists(prev => prev.map(l => {
                 if (l.id !== targetListId) return l;
                 return {
