@@ -1,0 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+    --safe-top: env(safe-area-inset-top, 24px);
+}
+
+@layer base {
+    body {
+        @apply bg-black text-white;
+        /* Force Black */
+    }
+}
+
+.no-scrollbar::-webkit-scrollbar {
+    display: none;
+}
+
+.no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
+
+.mask-gradient {
+    mask-image: linear-gradient(to right, black 85%, transparent 100%);
+}
+
+.pt-safe {
+    padding-top: var(--safe-top);
+}
+
+@keyframes shopez-pulse {
+    0%, 100% { opacity: 0.5; transform: scale(0.98); }
+    50% { opacity: 1; transform: scale(1); }
+}
+
+.shopez-pulse {
+    animation: shopez-pulse 1.8s infinite ease-in-out;
+}
