@@ -99,13 +99,13 @@ We have initialized this project folder `B:\ShopEZ` as a fresh Git repository. T
 5.  Click **"Create repository"**.
 
 ### Step 2: Add your Remote & Push
-Copy the GitHub repository URL (e.g. `https://github.com/YOUR_USERNAME/ShopEZ.git`) and run the following commands in your terminal inside `B:\ShopEZ`:
+Copy the GitHub repository URL (e.g. `https://github.com/healinglad/ShopEZ.git`) and run the following commands in your terminal inside `B:\ShopEZ`:
 
 ```bash
-# 1. Link your local repository to GitHub (replace with your actual URL)
-git remote add origin https://github.com/YOUR_USERNAME/ShopEZ.git
+# 1. Link your local repository to GitHub (Already done for you!)
+git remote add origin https://github.com/healinglad/ShopEZ.git
 
-# 2. Rename your default branch to main (standard practice)
+# 2. Rename your default branch to main (Already done for you!)
 git branch -M main
 
 # 3. Push your initial commit to GitHub
