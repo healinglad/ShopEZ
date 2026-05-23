@@ -24,6 +24,13 @@ const S = {
     titleBox: { display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' },
     title: { fontSize: '24px', fontWeight: '800', color: '#E8EAED', letterSpacing: '-0.5px' },
     subTitle: { fontSize: '13px', color: '#888', fontWeight: '500', marginTop: '2px' },
+    locationBadge: {
+        fontSize: '11px', color: '#8AB4F8', backgroundColor: 'rgba(138,180,248,0.08)',
+        padding: '4px 10px', borderRadius: '12px', cursor: 'pointer',
+        display: 'inline-flex', alignItems: 'center', gap: '4px',
+        border: '1px solid rgba(138,180,248,0.15)', marginTop: '6px',
+        fontWeight: '700', width: 'fit-content'
+    },
     iconBtn: { 
         background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)', 
         color: '#E8EAED', padding: '10px', cursor: 'pointer', borderRadius: '12px',
@@ -188,6 +195,15 @@ function App() {
         return saved || '1';
     });
 
+    const [location, setLocation] = useState(() => {
+        try {
+            const saved = localStorage.getItem('shopez_location');
+            return saved ? JSON.parse(saved) : { label: '📍 Bangalore', seed: 'Bangalore' };
+        } catch {
+            return { label: '📍 Bangalore', seed: 'Bangalore' };
+        }
+    });
+
     const [showMenu, setShowMenu] = useState(false);
     const [newListName, setNewListName] = useState('');
     const [showNewListForm, setShowNewListForm] = useState(false);
@@ -200,6 +216,34 @@ function App() {
 
     useEffect(() => { localStorage.setItem('shopez_lists', JSON.stringify(lists)); }, [lists]);
     useEffect(() => { localStorage.setItem('active_id', activeId); }, [activeId]);
+    useEffect(() => { localStorage.setItem('shopez_location', JSON.stringify(location)); }, [location]);
+
+    // --- HTML5 GEOLOCATION & REVERSE GEOCODING ---
+    useEffect(() => {
+        // Only trigger geolocation lookup if the location hasn't been manually set before
+        const isDefault = location.seed === 'Bangalore' && location.label === '📍 Bangalore';
+        if (isDefault && navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition((pos) => {
+                const { latitude, longitude } = pos.coords;
+                // Live geocoding via OpenStreetMap Nominatim API
+                fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=18&addressdetails=1`)
+                    .then(res => res.json())
+                    .then(data => {
+                        const addr = data.address;
+                        const neighborhood = addr.suburb || addr.neighbourhood || addr.residential || addr.sublocality || '';
+                        const city = addr.city || addr.town || addr.state_district || 'India';
+                        const postcode = addr.postcode || '';
+                        const label = `📍 ${neighborhood ? `${neighborhood}, ` : ''}${city}${postcode ? ` (${postcode})` : ''}`;
+                        setLocation({ label, seed: postcode || city });
+                    })
+                    .catch(() => {
+                        // Keep fallback Bangalore
+                    });
+            }, () => {
+                // Permission denied / GPS disabled - Keep fallback Bangalore
+            });
+        }
+    }, []);
 
     // Ensure activeId always points to an existing list
     const activeList = lists.find(l => l.id === activeId) || lists[0];
@@ -208,7 +252,17 @@ function App() {
         setLists(p => p.map(l => l.id === activeId ? { ...l, items: fn(l.items) } : l));
     }, [activeId]);
 
-    // --- AUTOMATED PRICE DISCOVERY EFFECT ---
+    // --- GEOGRAPHIC LOCATION UPDATER ---
+    const handleLocationUpdate = (newLabel, newSeed) => {
+        setLocation({ label: newLabel, seed: newSeed });
+        // Clear all item price matrices to trigger a complete fresh background recalculation based on the new location seed!
+        setLists(prev => prev.map(l => ({
+            ...l,
+            items: l.items.map(i => ({ ...i, prices: null, price: 0 }))
+        })));
+    };
+
+    // --- AUTOMATED LOCATION-AWARE PRICE DISCOVERY EFFECT ---
     useEffect(() => {
         // Find the first unchecked item in any list that does not have prices and is not loading
         let itemToFetch = null;
@@ -234,8 +288,8 @@ function App() {
             };
         }));
 
-        // Execute deterministic background search
-        fetchPrices(itemToFetch.text).then(data => {
+        // Execute background search using the active location seed
+        fetchPrices(itemToFetch.text, location.seed).then(data => {
             setLists(prev => prev.map(l => {
                 if (l.id !== targetListId) return l;
                 return {
@@ -244,14 +298,14 @@ function App() {
                         ...i,
                         loadingPrices: false,
                         prices: data.prices,
-                        price: data.cheapestPrice, // Automatically apply cheapest price to list budget!
+                        price: data.cheapestPrice, // Apply cheapest price to budget
                         cheapestPlatform: data.cheapestPlatform,
                         cheapestPrice: data.cheapestPrice
                     } : i)
                 };
             }));
         });
-    }, [lists]);
+    }, [lists, location.seed]);
 
     // --- ACTIONS ---
     const addItem = useCallback((inputs) => {
@@ -298,7 +352,7 @@ function App() {
 
     // --- FEATURES ---
 
-    // Budget logger - inline price editing (no prompt())
+    // Budget logger - inline price editing
     const startEditPrice = (id, currentPrice) => {
         setEditingPriceId(id);
         setPriceInputVal(currentPrice > 0 ? String(currentPrice) : '');
@@ -371,19 +425,35 @@ function App() {
 
             {/* HEADER */}
             <div style={S.header}>
-                <div>
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
                     <div style={S.titleBox} onClick={() => setShowMenu(true)}>
                         <span style={S.title}>{activeList.name}</span>
                         <ChevronDown size={20} color="#8AB4F8" style={{ marginTop: '2px' }} />
                     </div>
-                    <div style={S.subTitle}>
-                        {uncheckedCount} of {activeList.items.length} items
-                        {totalPrice > 0 && ` • ₹${totalPrice}`}
+                    {/* Live Geolocated Location Badge */}
+                    <div 
+                        style={S.locationBadge}
+                        onClick={() => {
+                            const newPin = prompt("Enter your Pincode or City name for location-based pricing:", location.seed);
+                            if (newPin && newPin.trim()) {
+                                const clean = newPin.trim();
+                                handleLocationUpdate(`📍 ${clean}`, clean);
+                            }
+                        }}
+                        title="Tap to change location"
+                    >
+                        {location.label}
                     </div>
                 </div>
-                <button style={S.iconBtn} onClick={shareList} title="Share via WhatsApp">
-                    <Share2 size={20} />
-                </button>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    <div style={{ fontSize: '11px', color: '#5F6368', textAlign: 'right', marginRight: '4px', display: 'flex', flexDirection: 'column' }}>
+                        <span style={{ fontWeight: '700', color: '#888' }}>{uncheckedCount} of {activeList.items.length} items</span>
+                        {totalPrice > 0 && <span style={{ color: '#10B981', fontWeight: '800', marginTop: '2px' }}>₹{totalPrice}</span>}
+                    </div>
+                    <button style={S.iconBtn} onClick={shareList} title="Share via WhatsApp">
+                        <Share2 size={20} />
+                    </button>
+                </div>
             </div>
 
             {/* LIST */}
@@ -454,7 +524,7 @@ function App() {
                                 {item.loadingPrices && (
                                     <div style={S.shimmerRow} className="shopez-pulse">
                                         <span style={S.shimmerDot} />
-                                        <span>Discovering prices on Blinkit, Zepto, Swiggy Instamart, BigBasket, Flipkart...</span>
+                                        <span>Discovering prices in {location.seed}...</span>
                                     </div>
                                 )}
 
@@ -548,7 +618,7 @@ function App() {
             <div style={S.bottomContainer}>
                 {totalPrice > 0 && (
                     <div style={S.totalBar}>
-                        <span>BEST VALUE BUDGET ESTIMATE</span>
+                        <span>BEST VALUE BUDGET ESTIMATE ({location.seed})</span>
                         <span>₹{totalPrice}</span>
                     </div>
                 )}

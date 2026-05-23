@@ -1,6 +1,6 @@
 /**
- * ShopEZ Price Service (v6.2)
- * Automated price discovery and optimization engine
+ * ShopEZ Price Service (v6.4)
+ * Automated price discovery and location-aware optimization engine
  */
 
 // Helper to get search URLs for each platform
@@ -26,8 +26,11 @@ export const getPlatformSearchUrl = (platformKey, query) => {
  * Automatically discovers prices for a given grocery item across all 5 platforms.
  * Uses a deterministic engine that matches common grocery items to highly accurate 
  * base price brackets, then adds realistic platform-specific pricing models.
+ * 
+ * Incorporates a locationSeed (such as a pincode or city name) to dynamically 
+ * scale and offset prices based on the user's physical geographic location.
  */
-export const fetchPrices = async (query) => {
+export const fetchPrices = async (query, locationSeed = '') => {
   return new Promise((resolve) => {
     // 1-second delay to show a beautiful background search shimmer
     setTimeout(() => {
@@ -67,23 +70,32 @@ export const fetchPrices = async (query) => {
       }
 
       // Hash to generate deterministic but realistic variations for each platform
-      const hashVal = q.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+      // We append the location seed to make the pricing uniquely responsive to the location!
+      const seedString = q + (locationSeed ? String(locationSeed).toLowerCase().trim() : '');
+      const hashVal = seedString.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
       
       // Platform-specific pricing variations (simulating actual market models)
-      // e.g. Zepto is aggressive on quick items, BigBasket on bulk, Flipkart on grocery boxes
       const blinkitVar = (hashVal % 12) - 3;      // -3 to +8
       const zeptoVar = ((hashVal * 3) % 10) - 4;   // -4 to +5
       const instamartVar = ((hashVal * 7) % 14) - 2; // -2 to +11
-      const bbVar = ((hashVal * 2) % 8) - 5;       // -5 to +2 (often cheaper but slower delivery)
-      const flipVar = ((hashVal * 5) % 16) - 7;    // -7 to +8 (great deals on grocery)
+      const bbVar = ((hashVal * 2) % 8) - 5;       // -5 to +2
+      const flipVar = ((hashVal * 5) % 16) - 7;    // -7 to +8
+
+      // Add a slight regional multiplier based on locationSeed length/hash to simulate regional pricing index
+      let regionalMultiplier = 1.0;
+      if (locationSeed) {
+        const locHash = String(locationSeed).split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+        // Surcharge or discount index between -5% and +10% depending on region
+        regionalMultiplier = 0.95 + ((locHash % 16) * 0.01);
+      }
 
       // Calculate final prices (ensuring they never drop below a realistic floor of 10)
       const prices = {
-        blinkit: Math.max(12, Math.round(basePrice + blinkitVar)),
-        zepto: Math.max(10, Math.round(basePrice + zeptoVar)),
-        instamart: Math.max(12, Math.round(basePrice + instamartVar)),
-        bigbasket: Math.max(15, Math.round(basePrice + bbVar)),
-        flipkart: Math.max(15, Math.round(basePrice + flipVar)),
+        blinkit: Math.max(12, Math.round((basePrice + blinkitVar) * regionalMultiplier)),
+        zepto: Math.max(10, Math.round((basePrice + zeptoVar) * regionalMultiplier)),
+        instamart: Math.max(12, Math.round((basePrice + instamartVar) * regionalMultiplier)),
+        bigbasket: Math.max(15, Math.round((basePrice + bbVar) * regionalMultiplier)),
+        flipkart: Math.max(15, Math.round((basePrice + flipVar) * regionalMultiplier)),
       };
 
       // Compile platform comparison data
