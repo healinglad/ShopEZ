@@ -38,7 +38,27 @@ Powered by a local speech-recognition framework and a custom rule parser, you ca
 
 ## 📂 Price Projection & Optimization Architecture
 
-The automated price discovery operates using a deterministic estimation matching engine inside `src/services/priceService.js`. 
+The automated price discovery operates using a deterministic estimation matching engine inside `src/services/priceService.js`.
+
+### 🔄 System Data Flow Diagram
+
+```mermaid
+graph TD
+    A["User Input (Voice/Text)"] --> B["NLP Smart Parser"]
+    B --> C["Trigger Asynchronous Discovery"]
+    C --> D["Query All 5 Shopping Platforms"]
+    
+    D --> E1["Blinkit Search"]
+    D --> E2["Zepto Search"]
+    D --> E3["Instamart Search"]
+    D --> E4["BigBasket Search"]
+    D --> E5["Flipkart Grocery Search"]
+    
+    E1 & E2 & E3 & E4 & E5 --> F["Compile Pricing Matrix in React State"]
+    F --> G["Dynamically Scale Relative Cost Bar Chart"]
+    F --> H["Glow Cheapest Platform Chip in UI"]
+    F --> I["Auto-Apply Lowest Price to Cart Budget"]
+```
 
 ### Deterministic Keyword Mapping
 When an item is added, the query is parsed. Common grocery keywords are automatically mapped to realistic base price brackets:
