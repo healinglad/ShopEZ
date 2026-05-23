@@ -255,21 +255,22 @@ function App() {
     // --- GEOGRAPHIC LOCATION UPDATER ---
     const handleLocationUpdate = (newLabel, newSeed) => {
         setLocation({ label: newLabel, seed: newSeed });
-        // Clear all item price matrices to trigger a complete fresh background recalculation based on the new location seed!
+        // Reset all prices to null to trigger fresh live discovery for the new location
         setLists(prev => prev.map(l => ({
             ...l,
-            items: l.items.map(i => ({ ...i, prices: null, price: 0 }))
+            items: l.items.map(i => ({ ...i, prices: null, price: 0, cheapestPlatform: null, cheapestPrice: 0, liveCount: 0 }))
         })));
     };
 
-    // --- AUTOMATED LOCATION-AWARE PRICE DISCOVERY EFFECT ---
+    // --- AUTOMATED LIVE PRICE DISCOVERY EFFECT ---
     useEffect(() => {
-        // Find the first unchecked item in any list that does not have prices and is not loading
+        // Find the first unchecked item in any list that needs price discovery
         let itemToFetch = null;
         let targetListId = null;
 
         for (const list of lists) {
-            const found = list.items.find(i => !i.prices && !i.loadingPrices && !i.checked);
+            // prices === null means never searched; prices === {} means searched but nothing found
+            const found = list.items.find(i => i.prices === null && !i.loadingPrices && !i.checked);
             if (found) {
                 itemToFetch = found;
                 targetListId = list.id;
@@ -288,7 +289,7 @@ function App() {
             };
         }));
 
-        // Execute background search using the active location seed
+        // Execute LIVE background search across all 5 platforms
         fetchPrices(itemToFetch.text, location.seed).then(data => {
             setLists(prev => prev.map(l => {
                 if (l.id !== targetListId) return l;
@@ -297,10 +298,29 @@ function App() {
                     items: l.items.map(i => i.id === itemToFetch.id ? {
                         ...i,
                         loadingPrices: false,
-                        prices: data.prices,
-                        price: data.cheapestPrice, // Apply cheapest price to budget
-                        cheapestPlatform: data.cheapestPlatform,
-                        cheapestPrice: data.cheapestPrice
+                        // Store discovered prices (may be empty {} if no platform responded)
+                        prices: data.prices || {},
+                        price: data.cheapestPrice || 0,
+                        cheapestPlatform: data.cheapestPlatform || null,
+                        cheapestPrice: data.cheapestPrice || 0,
+                        liveCount: data.liveCount || 0,
+                    } : i)
+                };
+            }));
+        }).catch(() => {
+            // Mark as searched (empty) so we don't retry infinitely
+            setLists(prev => prev.map(l => {
+                if (l.id !== targetListId) return l;
+                return {
+                    ...l,
+                    items: l.items.map(i => i.id === itemToFetch.id ? {
+                        ...i,
+                        loadingPrices: false,
+                        prices: {},
+                        price: 0,
+                        cheapestPlatform: null,
+                        cheapestPrice: 0,
+                        liveCount: 0,
                     } : i)
                 };
             }));
@@ -524,7 +544,7 @@ function App() {
                                 {item.loadingPrices && (
                                     <div style={S.shimmerRow} className="shopez-pulse">
                                         <span style={S.shimmerDot} />
-                                        <span>Discovering prices in {location.seed}...</span>
+                                        <span>🔍 Searching live on Blinkit, Zepto, Instamart, BigBasket, Flipkart...</span>
                                     </div>
                                 )}
 
@@ -534,19 +554,32 @@ function App() {
                                             const appKey = app.name.toLowerCase();
                                             const appPrice = item.prices?.[appKey];
                                             const isCheapest = item.cheapestPlatform === appKey;
+                                            const hasLivePrice = appPrice && appPrice > 0;
                                             
                                             return (
                                                 <button
                                                     key={app.name}
                                                     onClick={(e) => { e.stopPropagation(); openApp(app.name, item.text); }}
-                                                    style={isCheapest ? { ...S.chip, ...S.chipCheapest } : S.chip}
-                                                    title={`Search on ${app.name}`}
+                                                    style={isCheapest ? { ...S.chip, ...S.chipCheapest } : hasLivePrice ? S.chip : { ...S.chip, opacity: 0.5 }}
+                                                    title={hasLivePrice ? `Live price on ${app.name}` : `Tap to search on ${app.name}`}
                                                 >
-                                                    <span style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: app.color, flexShrink: 0 }} />
+                                                    {/* Live indicator dot: green if live price found, platform color otherwise */}
+                                                    <span style={{ 
+                                                        width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+                                                        backgroundColor: hasLivePrice ? '#10B981' : app.color,
+                                                        boxShadow: hasLivePrice ? '0 0 6px rgba(16,185,129,0.6)' : 'none'
+                                                    }} />
                                                     <span>
                                                         {app.name.toUpperCase()}
-                                                        {appPrice ? ` • ₹${appPrice}` : ''}
+                                                        {hasLivePrice ? ` • ₹${appPrice}` : ''}
                                                     </span>
+                                                    {hasLivePrice && (
+                                                        <span style={{ 
+                                                            fontSize: '8px', fontWeight: '800', color: '#10B981',
+                                                            backgroundColor: 'rgba(16,185,129,0.12)', padding: '1px 4px',
+                                                            borderRadius: '4px', letterSpacing: '0.5px'
+                                                        }}>LIVE</span>
+                                                    )}
                                                     {isCheapest && <Sparkles size={10} style={{ marginLeft: 2 }} />}
                                                 </button>
                                             );
@@ -618,7 +651,7 @@ function App() {
             <div style={S.bottomContainer}>
                 {totalPrice > 0 && (
                     <div style={S.totalBar}>
-                        <span>BEST VALUE BUDGET ESTIMATE ({location.seed})</span>
+                        <span>LIVE PRICE TOTAL ({location.seed})</span>
                         <span>₹{totalPrice}</span>
                     </div>
                 )}
